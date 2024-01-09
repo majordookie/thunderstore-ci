@@ -1,0 +1,256 @@
+name: CI
+
+on:
+  schedule:
+    - cron: "* */4 * * *"
+  push:
+    branches:
+      - "release/*"
+  workflow_dispatch:
+
+jobs:
+  create_scheduled_patch_release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Fetch all branches
+        run: git fetch --all
+
+      - name: Determine New Branch Name
+        id: new_branch
+        run: |
+          LATEST_BRANCH=$(git branch -r | grep 'origin/release/' | sort -Vr | head -n 1 | sed 's/[ \t]*origin\/release\///' | tr -d '\n')
+          IFS='.' read -ra VERSION <<< "$LATEST_BRANCH"
+          ((VERSION[2]++))
+          NEW_VERSION="${VERSION[0]}.${VERSION[1]}.${VERSION[2]}"
+          echo "Next branch name is ${VERSION[0]}.${VERSION[1]}.${VERSION[2]}"
+          echo "NEW_BRANCH=release/$NEW_VERSION" >> $GITHUB_ENV
+
+      - name: Create and Push New Branch
+        run: |
+          git checkout -b ${{ env.NEW_BRANCH }}
+          git push origin ${{ env.NEW_BRANCH }}
+
+  build_modpack_scheduled:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' && needs.create_scheduled_patch_release.result == 'success'
+    needs: [create_scheduled_patch_release]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Fetch all branches
+        run: git fetch --all
+
+      - name: Extract modpack details
+        id: extract_modpack_details
+        run: |
+          MODPACK_NAME=$(jq -r '.name' mod.json)
+          echo "MODPACK_NAME=$MODPACK_NAME" >> $GITHUB_ENV
+          echo "Modpack name set to $MODPACK_NAME"
+
+          AUTHOR_NAME=$(jq -r '.author_name' mod.json)
+          echo "AUTHOR_NAME=$AUTHOR_NAME" >> $GITHUB_ENV
+          echo "Author name set to $AUTHOR_NAME"
+
+          NSFW_CONTENT=$(jq -r '.has_nsfw_content' mod.json)
+          echo "NSFW_CONTENT=$NSFW_CONTENT" >> $GITHUB_ENV
+          echo "NSFW content flag set to $NSFW_CONTENT"
+
+          CATEGORIES=$(jq -r '.categories[]' mod.json | tr '\n' ',' | sed 's/,$//')
+          echo "CATEGORIES=$CATEGORIES" >> $GITHUB_ENV
+          echo "Categories set to $CATEGORIES"
+
+          COMMUNITIES=$(jq -r '.communities[]' mod.json | tr '\n' ',' | sed 's/,$//')
+          echo "COMMUNITIES=$COMMUNITIES" >> $GITHUB_ENV
+          echo "Communities set to $COMMUNITIES"
+
+          WEBSITE_URL=$(jq -r '.website_url' mod.json)
+          echo "WEBSITE_URL=$WEBSITE_URL" >> $GITHUB_ENV
+          echo "Website URL set to $WEBSITE_URL"
+
+          DESCRIPTION=$(jq -r '.description' mod.json)
+          echo "DESCRIPTION=$DESCRIPTION" >> $GITHUB_ENV
+          echo "Description set to $DESCRIPTION"
+
+      - name: Extract Version from Branch Name
+        run: |
+          LATEST_BRANCH=$(git branch -r | grep 'origin/release/' | sort -Vr | head -n 1 | sed 's/[ \t]*origin\/release\///' | tr -d '\n')
+          echo "LATEST_BRANCH=$LATEST_BRANCH"
+          echo "VERSION=$LATEST_BRANCH" >> $GITHUB_ENV
+          echo "VERSION set to $LATEST_BRANCH"
+
+      - name: "Update deps in manifest.json"
+        run: |
+          MOD_JSON=$(cat mod.json)
+          DEPENDENCIES=()
+          for row in $(echo "${MOD_JSON}" | jq -r '.dependencies[] | @base64'); do
+              _jq() {
+                echo ${row} | base64 --decode | jq -r ${1}
+              }
+
+              MOD_NAME=$(_jq '.name')
+              AUTHOR_NAME=$(_jq '.author')
+              LATEST_VERSION=$(curl -s "https://thunderstore.io/api/experimental/package/${AUTHOR_NAME}/${MOD_NAME}/" | jq -r '.latest.version_number')
+              DEPENDENCIES+=("\"${AUTHOR_NAME}-${MOD_NAME}-${LATEST_VERSION}\"")
+              echo "Updating dep to ${AUTHOR_NAME}-${MOD_NAME}-${LATEST_VERSION}"
+          done
+
+          echo "{
+            \"name\": \"${{ env.MODPACK_NAME }}\",
+            \"version_number\": \"${VERSION}\",
+            \"website_url\": \"${{ env.WEBSITE_URL }}\",
+            \"description\": \"${{ env.DESCRIPTION }}\",
+            \"dependencies\": [$(IFS=, ; echo "${DEPENDENCIES[*]}")]
+          }" | jq > manifest.json
+
+      - name: Package Files
+        run: |
+          zip ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip manifest.json README.md && zip -j ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip resources/icon.png
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.VERSION }}
+          release_name: Release ${{ env.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip
+          asset_name: ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip
+          asset_content_type: application/zip
+
+      - name: Upload to Thunderstore
+        run: |
+          curl -X POST -H "Authorization: Bearer ${{ secrets.THUNDERSTORE_API_KEY }}" \
+          -H "Content-Type: multipart/form-data" \
+          -F "metadata={
+                \"author_name\": \"${{ env.AUTHOR_NAME }}\",
+                \"has_nsfw_content\": ${{ env.NSFW_CONTENT }},
+                \"categories\": [\"${{ env.CATEGORIES }}\"],
+                \"communities\": [\"${{ env.COMMUNITIES }}\"]
+              }" \
+          -F "file=@./${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip" \
+          "https://thunderstore.io/api/experimental/submission/upload/"
+
+  build_modpack_release:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Fetch all branches
+        run: git fetch --all
+
+      - name: Extract modpack details
+        id: extract_modpack_details
+        run: |
+          MODPACK_NAME=$(jq -r '.name' mod.json)
+          echo "MODPACK_NAME=$MODPACK_NAME" >> $GITHUB_ENV
+          echo "Modpack name set to $MODPACK_NAME"
+
+          AUTHOR_NAME=$(jq -r '.author_name' mod.json)
+          echo "AUTHOR_NAME=$AUTHOR_NAME" >> $GITHUB_ENV
+          echo "Author name set to $AUTHOR_NAME"
+
+          NSFW_CONTENT=$(jq -r '.has_nsfw_content' mod.json)
+          echo "NSFW_CONTENT=$NSFW_CONTENT" >> $GITHUB_ENV
+          echo "NSFW content flag set to $NSFW_CONTENT"
+
+          CATEGORIES=$(jq -r '.categories[]' mod.json | tr '\n' ',' | sed 's/,$//')
+          echo "CATEGORIES=$CATEGORIES" >> $GITHUB_ENV
+          echo "Categories set to $CATEGORIES"
+
+          COMMUNITIES=$(jq -r '.communities[]' mod.json | tr '\n' ',' | sed 's/,$//')
+          echo "COMMUNITIES=$COMMUNITIES" >> $GITHUB_ENV
+          echo "Communities set to $COMMUNITIES"
+
+          WEBSITE_URL=$(jq -r '.website_url' mod.json)
+          echo "WEBSITE_URL=$WEBSITE_URL" >> $GITHUB_ENV
+          echo "Website URL set to $WEBSITE_URL"
+
+          DESCRIPTION=$(jq -r '.description' mod.json)
+          echo "DESCRIPTION=$DESCRIPTION" >> $GITHUB_ENV
+          echo "Description set to $DESCRIPTION"
+
+      - name: Extract Version from Branch Name
+        run: |
+          LATEST_BRANCH=$(git branch -r | grep 'origin/release/' | sort -Vr | head -n 1 | sed 's/[ \t]*origin\/release\///' | tr -d '\n')
+          echo "LATEST_BRANCH=$LATEST_BRANCH"
+          echo "VERSION=$LATEST_BRANCH" >> $GITHUB_ENV
+          echo "VERSION set to $LATEST_BRANCH"
+
+      - name: "Update deps in manifest.json"
+        run: |
+          MOD_JSON=$(cat mod.json)
+          DEPENDENCIES=()
+          for row in $(echo "${MOD_JSON}" | jq -r '.dependencies[] | @base64'); do
+              _jq() {
+                echo ${row} | base64 --decode | jq -r ${1}
+              }
+
+              MOD_NAME=$(_jq '.name')
+              AUTHOR_NAME=$(_jq '.author')
+              LATEST_VERSION=$(curl -s "https://thunderstore.io/api/experimental/package/${AUTHOR_NAME}/${MOD_NAME}/" | jq -r '.latest.version_number')
+              DEPENDENCIES+=("\"${AUTHOR_NAME}-${MOD_NAME}-${LATEST_VERSION}\"")
+              echo "Updating dep to ${AUTHOR_NAME}-${MOD_NAME}-${LATEST_VERSION}"
+          done
+
+          echo "{
+            \"name\": \"${{ env.MODPACK_NAME }}\",
+            \"version_number\": \"${VERSION}\",
+            \"website_url\": \"${{ env.WEBSITE_URL }}\",
+            \"description\": \"${{ env.DESCRIPTION }}\",
+            \"dependencies\": [$(IFS=, ; echo "${DEPENDENCIES[*]}")]
+          }" | jq > manifest.json
+
+      - name: Package Files
+        run: |
+          zip ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip manifest.json README.md && zip -j ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip resources/icon.png
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.VERSION }}
+          release_name: Release ${{ env.VERSION }}
+          draft: false
+          prerelease: false
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip
+          asset_name: ${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip
+          asset_content_type: application/zip
+
+      - name: Upload to Thunderstore
+        run: |
+          curl -X POST -H "Authorization: Bearer ${{ secrets.THUNDERSTORE_API_KEY }}" \
+          -H "Content-Type: multipart/form-data" \
+          -F "metadata={
+                \"author_name\": \"${{ env.AUTHOR_NAME }}\",
+                \"has_nsfw_content\": ${{ env.NSFW_CONTENT }},
+                \"categories\": [\"${{ env.CATEGORIES }}\"],
+                \"communities\": [\"${{ env.COMMUNITIES }}\"]
+              }" \
+          -F "file=@./${{ env.MODPACK_NAME }}-${{ env.VERSION }}.zip" \
+          "https://thunderstore.io/api/experimental/submission/upload/"
