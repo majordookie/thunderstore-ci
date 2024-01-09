@@ -1,15 +1,15 @@
 {
-  "name": "<name>",
-  "author_name": "<author name>",
-  "has_nsfw_content": <true/false>,
-  "categories": ["<categories>"],
-  "communities": ["<communities>"],
-  "website_url": "<url>",
-  "description": "<description>",
+  "name": "",
+  "author_name": "",
+  "has_nsfw_content": false,
+  "categories": [""],
+  "communities": [""],
+  "website_url": "",
+  "description": "",
   "dependencies": [
     {
-      "name": "<mod name>",
-      "author": "<author name>"
+      "name": "",
+      "author": ""
     }
   ]
 }
