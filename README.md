@@ -1,6 +1,11 @@
 # Thunderstore Mod CI
 
-This is a templatable CI that will automatically generate and upload a thunderstore mod on creation of a release branch using semver (release/x.x.x) and update the dependencies hourly in thunderstore with a patch version.
+This is a templatable CI that will 
+
+1. Automatically generate and upload a thunderstore mod on creation of a release branch using semver (release/x.x.x)
+2. Once pushed to thunderstore, the pipeline runs on an hourly cron and will update the dependencies, push a new patch release branch, and upload that to thunderstore with the patch version.
+
+## Requirements 
 
 1. Update mod.json with the necessary parameters, such that 
 ```
