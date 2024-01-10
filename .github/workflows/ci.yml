@@ -121,6 +121,7 @@ jobs:
         with:
           tag_name: ${{ env.VERSION }}
           release_name: Release ${{ env.VERSION }}
+          body: Scheduled patch to dependencies
           draft: false
           prerelease: false
 
