@@ -22,9 +22,11 @@ jobs:
       - name: Determine New Branch Name
         id: new_branch
         run: |
-          LATEST_BRANCH=$(git branch -r | grep 'origin/release/' | sort -Vr | head -n 1 | sed 's/[ \t]*origin\/release\///' | tr -d '\n')
+          LATEST_BRANCH=$(git branch -r | grep 'origin/release/' | tr -d ' ' | sort -Vr | head -n 1 | sed 's/[ \t]*origin\/release\///' | tr -d '\n')
           IFS='.' read -ra VERSION <<< "$LATEST_BRANCH"
-          ((VERSION[2]++))
+          PATCH_VERSION=${VERSION[2]}
+          PATCH_VERSION=$(expr $PATCH_VERSION + 1)
+          VERSION[2]=$PATCH_VERSION
           NEW_VERSION="${VERSION[0]}.${VERSION[1]}.${VERSION[2]}"
           echo "Next branch name is ${VERSION[0]}.${VERSION[1]}.${VERSION[2]}"
           echo "NEW_BRANCH=release/$NEW_VERSION" >> $GITHUB_ENV
